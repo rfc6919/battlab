@@ -122,6 +122,7 @@ class BattLabOne:
 
 if __name__ == '__main__':
     import sys
+    import time
     import serial.tools.list_ports
 
     all_ports = serial.tools.list_ports.comports()
@@ -130,11 +131,38 @@ if __name__ == '__main__':
         print('EE: no BattLab One found', file=sys.stderr)
         raise RuntimeError('no device found')
     elif len(battlab_one_ports) > 1:
-        print('EE: multiple BattLab Ones (BattLabs One?) found:', file=sys.stderr)
+        print('EE: multiple BattLab Ones (BattLabs One?) found', file=sys.stderr)
         raise RuntimeError('too many devices found')
     device = battlab_one_ports[0].device
     print(f'II: found BattLab One at {device}')
     b = BattLabOne(device)
+    print('II: resetting')
+    b._do_transaction('reset')
     print('II: firmware version {}'.format(b._do_transaction('get_version')))
-    print('II: calibration data {}'.format(b._do_transaction('get_calibration')))
-    print('II: config data {}'.format(b._do_transaction('get_config')))
+
+    cmds = 'set_voltage_1v2 set_current_high set_averages_64 set_psu_on'.split(' ')
+    for cmd in cmds:
+        print(f'II: sending command {cmd}')
+        b._do_transaction(cmd)
+    time.sleep(10)
+    print(f'II: starting sampling')
+    b._do_transaction('set_sample_on')
+
+    sample_count = 10000
+    sample_sum = 0
+    sample_min = sys.float_info.max
+    sample_max = 0
+    start_time = time.time()
+    for n in range(sample_count):
+        current_mA = b.get_sample()
+        print(current_mA, file=f)
+        sample_sum += current_mA
+        sample_min = min(sample_min, current_mA)
+        sample_max = max(sample_max, current_mA)
+    end_time = time.time()
+    b._do_transaction('set_sample_off')
+    b.sp.reset_input_buffer()
+
+    print(f'II: got {sample_count} samples in {end_time-start_time}s')
+    print(f'II: cal_adj:{b.cal_adj}')
+    print(f'II: min: {sample_min} max: {sample_max} avg: {sample_sum/sample_count}')
