@@ -1,6 +1,7 @@
 #!/usr/local/bin/python3
 
 import serial
+import struct
 import collections
 
 Transaction = collections.namedtuple(
@@ -20,7 +21,7 @@ transactions = {
     'set_psu_on':       Transaction(cmd=b'h'),
     'set_psu_off':      Transaction(cmd=b'i'),
 
-    'get_calibration':  Transaction(cmd=b'j', response_size=34),
+    'get_calibration':  Transaction(cmd=b'j', response_size=34, postprocess=lambda b: b),
     'get_config':       Transaction(cmd=b'm', response_size=4),
     'get_version':      Transaction(cmd=b'p', response_size=2, postprocess=lambda b: int.from_bytes(b, 'big')/1000),
 
@@ -32,33 +33,91 @@ transactions = {
     'set_averages_16':  Transaction(cmd=b'u'),
     'set_averages_64':  Transaction(cmd=b'v'),
 
-    'reboot':           Transaction(cmd=b'w'),  # only in version > 1002
+    'reset':            Transaction(cmd=b'w', postprocess=lambda b: time.sleep(1)),  # only in version > 1002
 
     'set_sample_trig':  Transaction(cmd=b'x'),
     'set_sample_off':   Transaction(cmd=b'y'),
     'set_sample_on':    Transaction(cmd=b'z'),
 }
 
+# indexes into the returned calibration data for sense resistor scaling values
+cal_indexes = {
+    'set_voltage_1v2': 0,
+    'set_voltage_1v5': 1,
+    'set_voltage_2v4': 2,
+    'set_voltage_3v0': 3,
+    'set_voltage_3v2': 3,
+    'set_voltage_3v6': 4,
+    'set_voltage_3v7': 5,
+    'set_voltage_4v2': 6,
+    'set_voltage_4v5': 7,
+}
+
+# indexes into the returned calibration data for sleep current offset values
+offset_indexes = {
+    'set_voltage_1v2': 8,
+    'set_voltage_1v5': 9,
+    'set_voltage_2v4': 10,
+    'set_voltage_3v0': 11,
+    'set_voltage_3v2': 12,
+    'set_voltage_3v6': 13,
+    'set_voltage_3v7': 14,
+    'set_voltage_4v2': 15,
+    'set_voltage_4v5': 16,
+}
 
 class BattLabOne:
 
     def __init__(self, device=None):
         self.sp = None
+        self.calibration_data = None
+
+        self.cal_adj = None
+        self.offset = None
+        self.low_current = None
+
         if device:
             self.connect(device)
 
     def connect(self, device):
         self.sp = serial.Serial(
             device, baudrate=115200, parity='N', bytesize=8, stopbits=1)
-        self.sp.flushInput()
-        self.sp.flushOutput()
+        self.sp.reset_input_buffer()
+        self.sp.reset_output_buffer()
+        self.calibrate()
         return self
+
+    def calibrate(self):
+        calibration_data_raw = self._do_transaction('get_calibration')
+        self.calibration_data = struct.unpack('>17H', calibration_data_raw)
 
     def _do_transaction(self, command):
         transaction = transactions[command]
         self.sp.write(transaction.cmd)
         response = self.sp.read(transaction.response_size)
+
+        # give the firmware time to do whatever, since we can't know when it's completed
+        if transaction.response_size == 0:
+            time.sleep(0.01)
+
+        # update calibration and offset if we've just set the supply voltage
+        if command.startswith('set_voltage_'):
+            self.cal_adj = self.calibration_data[cal_indexes[command]]/1000
+            self.offset = self.calibration_data[offset_indexes[command]]
+
+        # remember if we've got the low-current sense resistor enabled
+        if command.startswith('set_current_'):
+            self.low_current = command == 'set_current_low'
+
         return transaction.postprocess(response)
+
+    def get_sample(self):
+        raw_sample = self.sp.read(2)
+        sample = int.from_bytes(raw_sample, 'big')
+        sense_resistor_scale = 99 if self.low_current else self.cal_adj
+        lsb = 0.0025 # magic value?
+        current_mA = sample * lsb / sense_resistor_scale #- self.offset
+        return current_mA
 
 
 if __name__ == '__main__':
